@@ -933,7 +933,7 @@ async def shopify_run_report(params: RunReportInput) -> str:
         escaped_query = params.query.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
         graphql_body = {
-            "query": '{ shopifyqlQuery(query: "' + escaped_query + '") { __typename parseErrors tableData { unformattedData rowData columns { name dataType displayName } } } }'
+"query": '{ shopifyqlQuery(query: "' + escaped_query + '") { __typename parseErrors tableData { rows columns { name dataType displayName } } } }'
         }
 
         async with httpx.AsyncClient() as client:
@@ -962,7 +962,7 @@ async def shopify_run_report(params: RunReportInput) -> str:
         if table_data:
             return _fmt({
                 "columns": table_data.get("columns", []),
-                "data": table_data.get("unformattedData") or table_data.get("rowData", []),
+     "data": table_data.get("rows", []),
             })
 
         return _fmt(result)

@@ -860,6 +860,156 @@ async def shopify_create_fulfillment(params: CreateFulfillmentInput) -> str:
     except Exception as e:
         return _error(e)
 
+# ═══════════════════════════════════════════════════════════════════════════
+# INVENTORY ITEM (cost / COGS lookup)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class GetInventoryItemInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    inventory_item_id: int = Field(..., description="Inventory item ID (from product variant inventory_item_id)")
+
+
+@mcp.tool(
+    name="shopify_get_inventory_item",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+)
+async def shopify_get_inventory_item(params: GetInventoryItemInput) -> str:
+    """Get inventory item details including cost (COGS) for profit calculations."""
+    try:
+        data = await _request("GET", f"inventory_items/{params.inventory_item_id}.json")
+        return _fmt(data.get("inventory_item", data))
+    except Exception as e:
+        return _error(e)
+
+
+class GetInventoryItemsBatchInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ids: str = Field(..., description="Comma-separated inventory item IDs (max 100)")
+
+
+@mcp.tool(
+    name="shopify_get_inventory_items_batch",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+)
+async def shopify_get_inventory_items_batch(params: GetInventoryItemsBatchInput) -> str:
+    """Get multiple inventory items at once (up to 100). Returns cost/COGS for each item."""
+    try:
+        data = await _request("GET", "inventory_items.json", params={"ids": params.ids})
+        items = data.get("inventory_items", [])
+        return _fmt({"count": len(items), "inventory_items": items})
+    except Exception as e:
+        return _error(e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SHOPIFYQL REPORTS (GraphQL — gross profit, margins, analytics)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class RunReportInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    query: str = Field(
+        ...,
+        min_length=5,
+        description=(
+            "ShopifyQL query string. Examples: "
+            "'FROM sales SHOW net_sales, gross_profit DURING yesterday', "
+            "'FROM sales SHOW net_sales, gross_profit GROUP BY product_title DURING today'"
+        ),
+    )
+
+
+@mcp.tool(
+    name="shopify_run_report",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+)
+async def shopify_run_report(params: RunReportInput) -> str:
+    """Run a ShopifyQL analytics query. Returns sales, gross profit, margins, customer counts, and more.
+    Use DURING clause for date ranges (e.g., 'today', 'yesterday', 'last_7_days', or 'YYYY-MM-DD TO YYYY-MM-DD').
+    Requires read_reports scope."""
+    try:
+        # ShopifyQL uses the GraphQL Admin API, not REST
+        graphql_url = f"https://{SHOPIFY_STORE}.myshopify.com/admin/api/{API_VERSION}/graphql.json"
+        token = await token_manager.get_token()
+
+        # Escape the query for embedding in GraphQL
+        escaped_query = params.query.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+        graphql_body = {
+            "query": f'''
+            {{
+                shopifyqlQuery(query: "{escaped_query}") {{
+                    __typename
+                    ... on TableResponse {{
+                        tableData {{
+                            unformattedData
+                            rowData
+                            columns {{
+                                name
+                                dataType
+                                displayName
+                            }}
+                        }}
+                    }}
+                    ... on PolarisVizResponse {{
+                        tableData {{
+                            unformattedData
+                            rowData
+                            columns {{
+                                name
+                                dataType
+                                displayName
+                            }}
+                        }}
+                    }}
+                    parseErrors {{
+                        code
+                        message
+                        range {{
+                            start {{ line character }}
+                            end {{ line character }}
+                        }}
+                    }}
+                }}
+            }}
+            '''
+        }
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                graphql_url,
+                headers={
+                    "X-Shopify-Access-Token": token,
+                    "Content-Type": "application/json",
+                },
+                json=graphql_body,
+                timeout=30.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        # Check for GraphQL-level errors
+        if "errors" in data:
+            return _fmt({"error": "GraphQL error", "details": data["errors"]})
+
+        result = data.get("data", {}).get("shopifyqlQuery", {})
+
+        # Check for ShopifyQL parse errors
+        parse_errors = result.get("parseErrors")
+        if parse_errors:
+            return _fmt({"error": "ShopifyQL parse error", "details": parse_errors})
+
+        # Extract table data
+        table_data = result.get("tableData")
+        if table_data:
+            return _fmt({
+                "columns": table_data.get("columns", []),
+                "data": table_data.get("unformattedData") or table_data.get("rowData", []),
+            })
+
+        return _fmt(result)
+
+    except Exception as e:
+        return _error(e)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SHOP INFO

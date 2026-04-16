@@ -927,51 +927,13 @@ async def shopify_run_report(params: RunReportInput) -> str:
     Use DURING clause for date ranges (e.g., 'today', 'yesterday', 'last_7_days', or 'YYYY-MM-DD TO YYYY-MM-DD').
     Requires read_reports scope."""
     try:
-        # ShopifyQL uses the GraphQL Admin API, not REST
         graphql_url = f"https://{SHOPIFY_STORE}.myshopify.com/admin/api/{API_VERSION}/graphql.json"
         token = await token_manager.get_token()
 
-        # Escape the query for embedding in GraphQL
         escaped_query = params.query.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
         graphql_body = {
-            "query": f'''
-            {{
-                shopifyqlQuery(query: "{escaped_query}") {{
-                    __typename
-                    ... on TableResponse {{
-                        tableData {{
-                            unformattedData
-                            rowData
-                            columns {{
-                                name
-                                dataType
-                                displayName
-                            }}
-                        }}
-                    }}
-                    ... on PolarisVizResponse {{
-                        tableData {{
-                            unformattedData
-                            rowData
-                            columns {{
-                                name
-                                dataType
-                                displayName
-                            }}
-                        }}
-                    }}
-                    parseErrors {{
-                        code
-                        message
-                        range {{
-                            start {{ line character }}
-                            end {{ line character }}
-                        }}
-                    }}
-                }}
-            }}
-            '''
+            "query": '{ shopifyqlQuery(query: "' + escaped_query + '") { __typename parseErrors tableData { unformattedData rowData columns { name dataType displayName } } } }'
         }
 
         async with httpx.AsyncClient() as client:
@@ -987,18 +949,15 @@ async def shopify_run_report(params: RunReportInput) -> str:
             resp.raise_for_status()
             data = resp.json()
 
-        # Check for GraphQL-level errors
         if "errors" in data:
             return _fmt({"error": "GraphQL error", "details": data["errors"]})
 
         result = data.get("data", {}).get("shopifyqlQuery", {})
 
-        # Check for ShopifyQL parse errors
         parse_errors = result.get("parseErrors")
         if parse_errors:
             return _fmt({"error": "ShopifyQL parse error", "details": parse_errors})
 
-        # Extract table data
         table_data = result.get("tableData")
         if table_data:
             return _fmt({
